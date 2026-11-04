@@ -171,7 +171,7 @@ export const calendarService = {
   /**
    * Add a new event and generate its occurrences adhering to the exact data model
    */
-  addEvent(eventInput) {
+  async addEvent(eventInput) {
     const {
       title,
       description = "",
@@ -193,18 +193,22 @@ export const calendarService = {
         month: Number(bsDate.month),
         day: Number(bsDate.day)
       };
-      finalAnchorAdDate = bsToAd(finalAnchorBsDate.year, finalAnchorBsDate.month, finalAnchorBsDate.day);
+      const adResult = await bsToAd(finalAnchorBsDate.year, finalAnchorBsDate.month, finalAnchorBsDate.day);
+      finalAnchorAdDate = adResult.adDate;
     } else {
       finalAnchorAdDate = adDate || state.today;
-      finalAnchorBsDate = adToBs(finalAnchorAdDate);
+      const [y, m, d] = finalAnchorAdDate.split("-").map(Number);
+      const bsResult = await adToBs(y, m, d);
+      finalAnchorBsDate = { year: bsResult.year, month: bsResult.month, day: bsResult.day };
     }
 
     // Resolve anchorLunarDate
-    const tithiInfo = getTithiInfo(finalAnchorAdDate);
+    const tithiInfo = await getTithiInfo(finalAnchorAdDate);
     const finalAnchorLunarDate = {
       month: tithiInfo.month,
       paksha: tithiInfo.paksha,
-      tithi: tithiInfo.tithiNumber
+      tithi: tithiInfo.tithiInPaksha,
+      tithiNumber: tithiInfo.tithiNumber
     };
 
     // Generate new unique ID
@@ -245,7 +249,8 @@ export const calendarService = {
           occDateAd = `${targetAdYear}-${m}-${d}`;
         } else if (remCal === "BS") {
           // Same month and day in BS, converted to AD
-          occDateAd = bsToAd(targetBsYear, finalAnchorBsDate.month, finalAnchorBsDate.day);
+          const adResult = await bsToAd(targetBsYear, finalAnchorBsDate.month, finalAnchorBsDate.day);
+          occDateAd = adResult.adDate;
         } else if (remCal === "TITHI") {
           // Lunar anchor in target year
           occDateAd = finalAnchorAdDate;

@@ -1,130 +1,385 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
+
+import { initializeDatabase } from "./database/database";
+import { runMigrations }      from './database/migrations';
+import {
+  getAllEvents,
+  createEvent,
+  updateEvent as dbUpdateEvent,
+  deleteEvent as dbDeleteEvent,
+} from './repositories/eventRepository';
+import { generateOccurrences, adToBs, setCalendarLocation } from './utils/calendarUtils';
+import {
+  scheduleEventNotifications,
+  cancelEventNotifications,
+  ensureNotificationPermissions,
+  syncAllEventNotifications
+} from './services/notificationService';
+import { checkAuthRedirectCallback } from './services/googleDriveService';
+import { triggerSilentDriveSync } from './services/backupService';
+
 import "./App.css";
-import Header from "./components/Header";
-import CalendarView from "./components/CalendarView";
+import Header              from "./components/Header";
+import CalendarView        from "./components/CalendarView";
 import SelectedDateDetails from "./components/SelectedDateDetails";
-import AddEventModal from "./components/AddEventModal";
-import UpcomingEvents from "./components/UpcomingEvents";
-import { calendarService } from "./services/calendarService";
+import AddEventModal       from "./components/AddEventModal";
+import UpcomingEvents      from "./components/UpcomingEvents";
+import BaseEvents          from "./components/BaseEvents";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+function getRealTodayStr() {
+  const now = new Date();
+  const y   = now.getFullYear();
+  const m   = String(now.getMonth() + 1).padStart(2, "0");
+  const d   = String(now.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// App
+// ─────────────────────────────────────────────────────────────────────────────
 
 function App() {
-  const [todayStr] = useState(() => calendarService.getToday());
-  const [selectedDate, setSelectedDate] = useState(() => calendarService.getToday());
-  const [activeFilter, setActiveFilter] = useState("ALL"); // "ALL", "AD", "BS", "TITHI"
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [addModalInitialDate, setAddModalInitialDate] = useState(null);
-
-  // Synchronized state from calendarService
-  const [dataState, setDataState] = useState(() => ({
-    events: calendarService.getEvents(),
-    occurrences: calendarService.getOccurrences()
-  }));
+  // ── DB bootstrap ────────────────────────────────────────────────────────────
+  const [dbReady, setDbReady]   = useState(false);
+  const [dbError, setDbError]   = useState(null);
 
   useEffect(() => {
-    // Subscribe to service updates (when events are added/deleted/reset)
-    const unsubscribe = calendarService.subscribe((state) => {
-      setDataState({
-        events: [...state.events],
-        occurrences: [...state.occurrences]
-      });
-    });
-    return unsubscribe;
+    async function setup() {
+      try {
+        checkAuthRedirectCallback();
+        await initializeDatabase();
+        await runMigrations();
+        console.log("Database and migrations ready");
+        setDbReady(true);
+      } catch (error) {
+        console.error("Error initializing database:", error);
+        setDbError(error?.message ?? String(error));
+      }
+    }
+    setup();
   }, []);
 
-  // Events map for calendar cells (filtered)
+  // ── Today / selected date ────────────────────────────────────────────────────
+  const todayStr = useMemo(() => getRealTodayStr(), []);
+  const [selectedDate, setSelectedDate] = useState(todayStr);
+
+  // ── Theme ────────────────────────────────────────────────────────────────────
+  const [theme, setTheme] = useState(() => localStorage.getItem("tricalendar_theme") || "light");
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+  }, [theme]);
+
+  const handleToggleTheme = (newTheme) => {
+    setTheme(newTheme);
+    try { localStorage.setItem("tricalendar_theme", newTheme); } catch {}
+  };
+
+  // ── Location (Panchang / Tithi City) ─────────────────────────────────────────
+  const [location, setLocation] = useState(() => {
+    try {
+      return localStorage.getItem("tricalendar_location") || "KATHMANDU";
+    } catch {
+      return "KATHMANDU";
+    }
+  });
+
+  useEffect(() => {
+    if (location) {
+      setCalendarLocation({ city: location }).catch((err) =>
+        console.warn("Could not set initial calendar location:", err)
+      );
+    }
+  }, [location]);
+
+  // ── Events + Occurrences state (sourced entirely from SQLite + Java engine) ──
+  const [events,      setEvents]      = useState([]);
+  const [occurrences, setOccurrences] = useState([]); // { eventId, reminderCalendar, occurrenceDateAd }
+
+  // Load all events from SQLite and generate their occurrence dates via the
+  // native CalendarEngine plugin (OccurrenceService.generateOccurrences).
+  // Fix #1: parallelise all generateOccurrences calls with Promise.all instead
+  //         of awaiting them one-by-one in a sequential for…of loop.
+  // Fix #6: wrapped in useCallback so the reference is stable across renders.
+  const loadData = useCallback(async () => {
+    try {
+      const dbEvents = await getAllEvents();
+      setEvents(dbEvents);
+
+      // Fire ALL generateOccurrences calls in parallel — no sequential waiting
+      const results = await Promise.all(
+        dbEvents.map(event =>
+          generateOccurrences({
+            eventId:           event.id,
+            title:             event.title,
+            description:       event.description || "",
+            anchorAdDate:      event.anchorAdDate,
+            anchorBsDate:      event.anchorBsDate,
+            anchorLunarDate:   event.anchorLunarDate,   // may be null → plugin skips TITHI
+            recurrence:        event.recurrence,
+            eventType:         event.eventType,
+            reminderCalendars: event.reminderCalendars,
+            numberOfYears:     3,
+          }).catch(err => {
+            console.error("Failed to generate occurrences for event:", event.id, err);
+            return []; // graceful degradation — don't fail the whole load
+          })
+        )
+      );
+
+      const allOccs = results.flatMap((occs, i) =>
+        occs.map(occ => ({
+          eventId:          dbEvents[i].id,
+          reminderCalendar: occ.reminderCalendar,
+          occurrenceDateAd: occ.occurrenceDate,
+        }))
+      );
+
+      setOccurrences(allOccs);
+
+      // Automatically sync future reminders with Android's AlarmManager
+      // so 4th, 5th, etc. years are always queued even if user never re-edits events
+      syncAllEventNotifications(dbEvents, allOccs).catch(err =>
+        console.warn("Could not sync background alarms:", err)
+      );
+    } catch (err) {
+      console.error("Failed to load events:", err);
+    }
+  }, []); // stable — only uses setters and top-level imports
+
+  // Load once DB is ready, and re-check occurrences whenever todayStr rolls over
+  useEffect(() => {
+    if (dbReady) loadData();
+  }, [dbReady, todayStr, loadData]);
+
+  // ── Derived maps ──────────────────────────────────────────────────────────────
+
+  // { "YYYY-MM-DD": [ { occurrence, event }, ... ] }
   const occurrencesByDateMap = useMemo(() => {
-    if (!dataState) return {};
-    return calendarService.getOccurrencesByDateMap(activeFilter);
-  }, [activeFilter, dataState]);
+    const eventMap = new Map(events.map(e => [e.id, e]));
+    const map = {};
+    for (const occ of occurrences) {
+      const key = occ.occurrenceDateAd;
+      if (!map[key]) map[key] = [];
+      const event = eventMap.get(occ.eventId);
+      if (event) map[key].push({ occurrence: occ, event });
+    }
+    return map;
+  }, [events, occurrences]);
 
-  // Events on the currently selected date
+  // Events on the currently selected date (both generated occurrences and base event anchors)
   const eventsOnSelectedDate = useMemo(() => {
-    if (!dataState) return [];
-    return calendarService.getEventsForDate(selectedDate, activeFilter);
-  }, [selectedDate, activeFilter, dataState]);
+    const list = occurrencesByDateMap[selectedDate] ? [...occurrencesByDateMap[selectedDate]] : [];
+    const presentEventIds = new Set(list.map(item => item.event.id));
 
-  // Upcoming occurrences
-  const upcomingOccurrences = useMemo(() => {
-    if (!dataState) return [];
-    return calendarService.getUpcomingOccurrences(todayStr, activeFilter, 15);
-  }, [todayStr, activeFilter, dataState]);
+    // Also include any base event whose anchor date is selectedDate
+    for (const ev of events) {
+      if (ev.anchorAdDate === selectedDate && !presentEventIds.has(ev.id)) {
+        list.push({
+          occurrence: {
+            eventId: ev.id,
+            reminderCalendar: ev.reminderCalendars?.[0] || "AD",
+            occurrenceDateAd: ev.anchorAdDate
+          },
+          event: ev
+        });
+        presentEventIds.add(ev.id);
+      }
+    }
+    return list;
+  }, [selectedDate, occurrencesByDateMap, events]);
 
-  // Calendar container ref for smooth scrolling when an upcoming event is clicked
+  // Upcoming occurrences starting from today, sorted ascending.
+  // Fix #3: separate the pure filtering/sorting (useMemo — no async, stable ref)
+  // from the BS date resolution (useEffect — only re-runs when candidates change).
+  // Combined with the adToBs cache (Fix #2), repeated BS lookups cost ~0 ms.
+  const [upcomingOccurrences, setUpcomingOccurrences] = useState([]);
+
+  const upcomingCandidates = useMemo(() => {
+    const eventMap = new Map(events.map(e => [e.id, e]));
+    return occurrences
+      .filter(occ => occ.occurrenceDateAd >= todayStr)
+      .sort((a, b) => a.occurrenceDateAd.localeCompare(b.occurrenceDateAd))
+      .slice(0, 15)
+      .map(occ => ({ occurrence: occ, event: eventMap.get(occ.eventId) }))
+      .filter(x => x.event);
+  }, [occurrences, events, todayStr]);
+
+  useEffect(() => {
+    let cancelled = false;
+    // Pre-resolve BS date for each occurrence in parallel
+    Promise.all(
+      upcomingCandidates.map(async (item) => {
+        const [y, m, d] = item.occurrence.occurrenceDateAd.split("-").map(Number);
+        try {
+          const bs = await adToBs(y, m, d); // hits cache on 2nd+ run (Fix #2)
+          return { ...item, bs };
+        } catch {
+          return { ...item, bs: null };
+        }
+      })
+    ).then(result => { if (!cancelled) setUpcomingOccurrences(result); })
+     .catch(console.error);
+    return () => { cancelled = true; };
+  }, [upcomingCandidates]);
+
+  // ── Handlers ──────────────────────────────────────────────────────────────────
   const calendarRef = useRef(null);
 
-  const handleSelectDate = (adDateStr) => {
-    setSelectedDate(adDateStr);
-  };
+  // Fix #4: stable callback so CalendarCell's React.memo can prevent re-renders
+  const handleSelectDate = useCallback((adDateStr) => setSelectedDate(adDateStr), []);
 
-  const handleUpcomingClick = (adDateStr) => {
+  const handleUpcomingClick = useCallback((adDateStr) => {
     setSelectedDate(adDateStr);
-    // Smooth scroll to calendar
-    if (calendarRef.current) {
-      calendarRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
-    }
-  };
+    calendarRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
+
+  // Request notification permissions on mount
+  useEffect(() => {
+    ensureNotificationPermissions().catch((err) =>
+      console.warn("Notification permissions init error:", err)
+    );
+  }, []);
+
+  const [showAddModal, setShowAddModal]               = useState(false);
+  const [editingEvent, setEditingEvent]               = useState(null);
+  const [addModalInitialDate, setAddModalInitialDate] = useState(null);
 
   const handleOpenAddEvent = (presetDate = selectedDate) => {
+    setEditingEvent(null);
     setAddModalInitialDate(presetDate || selectedDate || todayStr);
     setShowAddModal(true);
   };
 
-  const handleSaveNewEvent = (eventInput) => {
-    const result = calendarService.addEvent(eventInput);
-    if (result && result.event) {
-      // Select the anchor date of the created event
-      setSelectedDate(result.event.anchorAdDate);
+  const handleEditEvent = (event) => {
+    setEditingEvent(event);
+    setAddModalInitialDate(event.anchorAdDate);
+    setShowAddModal(true);
+  };
+
+  async function handleSaveEvent(eventInput) {
+    let targetId = eventInput.id;
+    if (targetId) {
+      await dbUpdateEvent(targetId, eventInput);
+    } else {
+      targetId = await createEvent(eventInput);
+      eventInput.id = targetId;
     }
-  };
 
-  const handleDeleteEvent = (eventId) => {
-    calendarService.deleteEvent(eventId);
-  };
+    const adDateStr = eventInput.anchorAdDate || eventInput.adDate;
+    setSelectedDate(adDateStr);
 
-  const handleResetData = () => {
-    calendarService.resetToMockData();
-    setSelectedDate(todayStr);
-  };
+    // Schedule notifications for occurrences
+    try {
+      const occs = await generateOccurrences({
+        eventId:           targetId,
+        title:             eventInput.title,
+        description:       eventInput.description || "",
+        anchorAdDate:      adDateStr,
+        anchorBsDate:      eventInput.anchorBsDate || eventInput.bsDate,
+        anchorLunarDate:   eventInput.anchorLunarDate || eventInput.lunarDate,
+        recurrence:        eventInput.recurrence,
+        eventType:         eventInput.eventType,
+        reminderCalendars: eventInput.reminderCalendars,
+        numberOfYears:     3,
+      });
+
+      await scheduleEventNotifications(
+        { ...eventInput, id: targetId },
+        occs
+      );
+    } catch (notifErr) {
+      console.warn("Could not schedule notifications for event:", notifErr);
+    }
+
+    await loadData();
+    setShowAddModal(false);
+    setEditingEvent(null);
+
+    // Silent background sync with connected Google Drive (never interrupts offline users)
+    triggerSilentDriveSync();
+  }
+
+  async function handleDeleteEvent(eventId) {
+    try {
+      await cancelEventNotifications(eventId);
+      await dbDeleteEvent(eventId);
+      await loadData();
+      triggerSilentDriveSync();
+    } catch (err) {
+      console.error("Failed to delete event:", err);
+    }
+  }
+
+  // ── Render ────────────────────────────────────────────────────────────────────
+  if (dbError) return <p>Database error: {dbError}</p>;
+  if (!dbReady) return <p>Initializing TriCalendar…</p>;
 
   return (
-    <div className="mobile-viewport-wrapper">
+    <div className="mobile-viewport-wrapper" data-theme={theme}>
       <main className="mobile-container">
-        {/* Top Header: App name, Circle Profile Picture, Settings */}
-        <Header onResetData={handleResetData} />
 
-        {/* Calendar Interface: AD & BS switch, Pick Date section, 3-value cells */}
+        <Header
+          theme={theme}
+          onToggleTheme={handleToggleTheme}
+          currentLocation={location}
+          onDataReload={loadData}
+          onLocationChange={async (newCity) => {
+            setLocation(newCity);
+            try {
+              await setCalendarLocation({ city: newCity });
+            } catch (err) {
+              console.warn("Failed to set calendar location:", err);
+            }
+            await loadData();
+          }}
+          onResetData={async () => {
+            // "Reset" now just clears all user events from the DB
+            if (window.confirm("Delete ALL events? This cannot be undone.")) {
+              const all = await getAllEvents();
+              for (const e of all) await dbDeleteEvent(e.id);
+              await loadData();
+            }
+          }}
+        />
+
+        {/* Calendar — grid built entirely from getMonthAd/getMonthBs plugin calls */}
         <div ref={calendarRef}>
           <CalendarView
             selectedDate={selectedDate}
             onSelectDate={handleSelectDate}
             occurrencesByDateMap={occurrencesByDateMap}
             todayStr={todayStr}
-            activeFilter={activeFilter}
-            onChangeFilter={setActiveFilter}
           />
         </div>
 
-        {/* Selected Date Details */}
+        {/* Selected date details — BS and Tithi fetched asynchronously from plugin */}
         <SelectedDateDetails
           selectedDate={selectedDate}
+          todayStr={todayStr}
           eventsOnDate={eventsOnSelectedDate}
           onDeleteEvent={handleDeleteEvent}
           onOpenAddEvent={handleOpenAddEvent}
+          location={location}
         />
 
-        {/* Big "Add Event" Button */}
-        <section className="add-action-section">
+        {/* Minimal Add Event Button */}
+        <div className="add-event-action-bar">
           <button
             type="button"
-            className="big-add-event-btn"
+            className="minimal-add-event-btn"
             onClick={() => handleOpenAddEvent(selectedDate)}
           >
-            <span className="btn-plus-icon">+</span>
+            <span className="add-btn-plus">+</span>
             <span>Add Event</span>
           </button>
-        </section>
+        </div>
 
-        {/* Upcoming Events Section (click to select date) */}
+        {/* Upcoming events */}
         <UpcomingEvents
           upcomingOccurrences={upcomingOccurrences}
           todayStr={todayStr}
@@ -132,17 +387,31 @@ function App() {
           onSelectDate={handleUpcomingClick}
         />
 
-        {/* Add Event Modal Dialog */}
+        {/* Base events (original registered dates, e.g. Birthdays, Anniversaries) */}
+        <BaseEvents
+          events={events}
+          todayStr={todayStr}
+          selectedDate={selectedDate}
+          onSelectDate={handleUpcomingClick}
+          onEditEvent={handleEditEvent}
+          onDeleteEvent={handleDeleteEvent}
+        />
+
+        {/* Add / Edit Event modal */}
         {showAddModal && (
           <AddEventModal
             initialDateAd={addModalInitialDate || selectedDate}
-            onClose={() => setShowAddModal(false)}
-            onSave={handleSaveNewEvent}
+            eventToEdit={editingEvent}
+            onClose={() => {
+              setShowAddModal(false);
+              setEditingEvent(null);
+            }}
+            onSave={handleSaveEvent}
           />
         )}
 
         <footer className="app-footer">
-          <p>TriCalendar · Offline-First Engine · AD · BS · Tithi</p>
+          <p>TriCalendar · AD · BS · Tithi</p>
         </footer>
       </main>
     </div>

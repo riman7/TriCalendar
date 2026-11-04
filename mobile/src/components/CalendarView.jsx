@@ -1,9 +1,10 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import CalendarCell from "./CalendarCell";
 import {
   getAdMonthGrid,
   getBsMonthGrid,
   NEPALI_MONTHS,
+  BS_YEARS,
   adToBs,
   bsToAd,
   parseYMD
@@ -15,14 +16,16 @@ export default function CalendarView({
   selectedDate,
   onSelectDate,
   occurrencesByDateMap,
-  todayStr,
-  activeFilter,
-  onChangeFilter
+  todayStr
 }) {
   // Calendar mode: "AD" (Gregorian) or "BS" (Bikram Sambat)
   const [calendarMode, setCalendarMode] = useState("AD");
 
-  const [adView, setAdView] = useState({ year: 2026, month: 11 }); // November 2026 (matches mock data)
+  const [adView, setAdView] = useState(() => {
+    const s = selectedDate || todayStr || "2026-11-06";
+    const [y, m] = s.split("-").map(Number);
+    return { year: y || 2026, month: m || 11 };
+  });
   
   // Track the month being viewed in BS: { year, month }
   const [bsView, setBsView] = useState({ year: 2083, month: 7 }); // Kartik 2083 BS
@@ -35,21 +38,77 @@ export default function CalendarView({
   const [jumpBsMonth, setJumpBsMonth] = useState(7);
   const [jumpBsDay, setJumpBsDay] = useState(19);
 
+  // Synchronize BS view on initial mount
+  useEffect(() => {
+    const s = selectedDate || todayStr;
+    if (s) {
+      const [y, m, d] = s.split("-").map(Number);
+      adToBs(y, m, d).then(bs => {
+        setBsView({ year: bs.year, month: bs.month });
+      }).catch(() => {});
+    }
+  }, []);
+
+  // Synchronize viewing month whenever selectedDate changes externally
+  // (e.g. clicking an upcoming event, a base event card, or executing jump)
+  const prevSelectedDateRef = useRef(selectedDate);
+  useEffect(() => {
+    if (!selectedDate) return;
+    if (prevSelectedDateRef.current === selectedDate) {
+      return;
+    }
+    prevSelectedDateRef.current = selectedDate;
+
+    const [y, m, d] = selectedDate.split("-").map(Number);
+    if (!y || !m || !d) return;
+
+    let cancelled = false;
+    async function syncViewWithSelectedDate() {
+      try {
+        const bs = await adToBs(y, m, d);
+        if (cancelled) return;
+        setAdView(prev => (prev.year === y && prev.month === m ? prev : { year: y, month: m }));
+        setBsView(prev => (prev.year === bs.year && prev.month === bs.month ? prev : { year: bs.year, month: bs.month }));
+      } catch (err) {
+        setAdView(prev => (prev.year === y && prev.month === m ? prev : { year: y, month: m }));
+      }
+    }
+    syncViewWithSelectedDate();
+    return () => { cancelled = true; };
+  }, [selectedDate]);
+
+  // Keep jump inputs fresh when date picker is opened
+  useEffect(() => {
+    if (showDatePicker && selectedDate) {
+      setJumpAdDate(selectedDate);
+      const [y, m, d] = selectedDate.split("-").map(Number);
+      adToBs(y, m, d).then(bs => {
+        setJumpBsYear(bs.year);
+        setJumpBsMonth(bs.month);
+        setJumpBsDay(bs.day);
+      }).catch(() => {});
+    }
+  }, [showDatePicker, selectedDate]);
+
   // When switching calendar mode, synchronize the viewing month
-  const handleToggleMode = (newMode) => {
+  const handleToggleMode = async (newMode) => {
     if (newMode === calendarMode) return;
     setCalendarMode(newMode);
 
     if (newMode === "BS") {
-      // Convert current AD view to BS
-      const firstAdOfMonth = `${adView.year}-${String(adView.month).padStart(2, "0")}-15`;
-      const bs = adToBs(firstAdOfMonth);
-      setBsView({ year: bs.year, month: bs.month });
+      // Convert current AD view mid-month to BS
+      const [y, m] = [adView.year, adView.month];
+      try {
+        const bs = await adToBs(y, m, 15);
+        setBsView({ year: bs.year, month: bs.month });
+      } catch { /* keep current bs view */ }
     } else {
-      // Convert current BS view to AD
-      const ad = bsToAd(bsView.year, bsView.month, 15);
-      const adObj = parseYMD(ad);
-      setAdView({ year: adObj.getUTCFullYear(), month: adObj.getUTCMonth() + 1 });
+      // Convert current BS view mid-month to AD
+      try {
+        const ad = await bsToAd(bsView.year, bsView.month, 15);
+        const adObj = parseYMD(ad.adDate);
+        setAdView({ year: adObj.getUTCFullYear(), month: adObj.getUTCMonth() + 1 });
+      } catch { /* keep current ad view */ }
     }
   };
 
@@ -95,66 +154,96 @@ export default function CalendarView({
   };
 
   // Jump to today
-  const handleGoToToday = () => {
+  const handleGoToToday = async () => {
     onSelectDate(todayStr);
     const todayObj = parseYMD(todayStr);
     setAdView({ year: todayObj.getUTCFullYear(), month: todayObj.getUTCMonth() + 1 });
-    const todayBs = adToBs(todayStr);
-    setBsView({ year: todayBs.year, month: todayBs.month });
+    try {
+      const [y, m, d] = todayStr.split("-").map(Number);
+      const todayBs = await adToBs(y, m, d);
+      setBsView({ year: todayBs.year, month: todayBs.month });
+    } catch { /* keep current bs view */ }
   };
 
   // Handle jump submission
-  const handleExecuteJump = (e) => {
+  const handleExecuteJump = async (e) => {
     e.preventDefault();
     if (jumpMode === "AD") {
       if (!jumpAdDate) return;
       onSelectDate(jumpAdDate);
       const d = parseYMD(jumpAdDate);
       setAdView({ year: d.getUTCFullYear(), month: d.getUTCMonth() + 1 });
-      const bs = adToBs(jumpAdDate);
-      setBsView({ year: bs.year, month: bs.month });
+      try {
+        const [y, m, day] = jumpAdDate.split("-").map(Number);
+        const bs = await adToBs(y, m, day);
+        setBsView({ year: bs.year, month: bs.month });
+      } catch { /* keep current bs view */ }
     } else {
-      const adStr = bsToAd(Number(jumpBsYear), Number(jumpBsMonth), Number(jumpBsDay));
-      onSelectDate(adStr);
-      const d = parseYMD(adStr);
-      setAdView({ year: d.getUTCFullYear(), month: d.getUTCMonth() + 1 });
-      setBsView({ year: Number(jumpBsYear), month: Number(jumpBsMonth) });
+      try {
+        const result = await bsToAd(Number(jumpBsYear), Number(jumpBsMonth), Number(jumpBsDay));
+        const adStr = result.adDate;
+        onSelectDate(adStr);
+        const d = parseYMD(adStr);
+        setAdView({ year: d.getUTCFullYear(), month: d.getUTCMonth() + 1 });
+        setBsView({ year: Number(jumpBsYear), month: Number(jumpBsMonth) });
+      } catch { /* ignore */ }
     }
     setShowDatePicker(false);
   };
 
-  // Compute grid cells
-  const cells = useMemo(() => {
-    if (calendarMode === "AD") {
-      return getAdMonthGrid(adView.year, adView.month);
-    } else {
-      return getBsMonthGrid(bsView.year, bsView.month);
-    }
-  }, [calendarMode, adView, bsView]);
+  // Compute grid cells — async because getMonthAd/getBsMonthGrid delegate to native plugin
+  const [cells, setCells] = useState([]);
+  // Display month title — computed in the same effect as cell loading to avoid a
+  // second redundant adToBs/bsToAd call (Fix #5).
+  const [monthTitle, setMonthTitle] = useState({ primary: "", secondary: "" });
 
-  // Display month title
-  const monthTitle = useMemo(() => {
-    if (calendarMode === "AD") {
-      const d = new Date(Date.UTC(adView.year, adView.month - 1, 1));
-      const adMonthName = d.toLocaleString("en-US", { month: "long", timeZone: "UTC" });
-      const midAd = `${adView.year}-${String(adView.month).padStart(2, "0")}-15`;
-      const bs = adToBs(midAd);
-      const bsMonthName = NEPALI_MONTHS[bs.month - 1]?.name;
-      return {
-        primary: `${adMonthName} ${adView.year}`,
-        secondary: `${bsMonthName} ${bs.year} BS`
-      };
-    } else {
-      const bsMonthName = NEPALI_MONTHS[bsView.month - 1]?.name;
-      const bsNepaliName = NEPALI_MONTHS[bsView.month - 1]?.np;
-      const midAdStr = bsToAd(bsView.year, bsView.month, 15);
-      const midAdObj = parseYMD(midAdStr);
-      const adMonthName = midAdObj.toLocaleString("en-US", { month: "short", timeZone: "UTC" });
-      return {
-        primary: `${bsMonthName} ${bsView.year} BS`,
-        secondary: `${bsNepaliName} · ${adMonthName} ${midAdObj.getUTCFullYear()} AD`
-      };
+  useEffect(() => {
+    let cancelled = false;
+    async function loadCellsAndTitle() {
+      try {
+        let result;
+        if (calendarMode === "AD") {
+          // Single batch call returns all days including BS equivalents
+          result = await getAdMonthGrid(adView.year, adView.month);
+          if (cancelled) return;
+          setCells(result);
+
+          // Derive month title from already-fetched grid data — no extra plugin call
+          const d = new Date(Date.UTC(adView.year, adView.month - 1, 1));
+          const adMonthName = d.toLocaleString("en-US", { month: "long", timeZone: "UTC" });
+          // Use mid-month cell's BS info (already in the grid) instead of calling adToBs again
+          const midCell = result[Math.floor(result.length / 2)];
+          const bsMonthName = midCell ? (NEPALI_MONTHS[midCell.bsMonth - 1]?.name ?? "") : "";
+          const bsYear      = midCell?.bsYear ?? "";
+          if (!cancelled) setMonthTitle({
+            primary:   `${adMonthName} ${adView.year}`,
+            secondary: `${bsMonthName} ${bsYear} BS`
+          });
+        } else {
+          result = await getBsMonthGrid(bsView.year, bsView.month);
+          if (cancelled) return;
+          setCells(result);
+
+          const bsMonthName  = NEPALI_MONTHS[bsView.month - 1]?.name  ?? "";
+          const bsNepaliName = NEPALI_MONTHS[bsView.month - 1]?.np    ?? "";
+          // Use first real cell's AD info instead of calling bsToAd again
+          const firstReal = result.find(c => !c.isOtherMonth);
+          const adMonthName = firstReal
+            ? new Date(Date.UTC(firstReal.adYear, firstReal.adMonth - 1, 1))
+                .toLocaleString("en-US", { month: "short", timeZone: "UTC" })
+            : "";
+          const adYear = firstReal?.adYear ?? "";
+          if (!cancelled) setMonthTitle({
+            primary:   `${bsMonthName} ${bsView.year} BS`,
+            secondary: `${bsNepaliName} · ${adMonthName} ${adYear} AD`
+          });
+        }
+      } catch (err) {
+        console.error("Failed to load calendar grid:", err);
+      }
     }
+    loadCellsAndTitle();
+    return () => { cancelled = true; };
   }, [calendarMode, adView, bsView]);
 
   return (
@@ -237,7 +326,7 @@ export default function CalendarView({
                     value={jumpBsYear}
                     onChange={(e) => setJumpBsYear(Number(e.target.value))}
                   >
-                    {[2075, 2076, 2077, 2078, 2079, 2080, 2081, 2082, 2083, 2084, 2085].map((y) => (
+                    {BS_YEARS.map((y) => (
                       <option key={y} value={y}>
                         {y} BS
                       </option>
@@ -328,22 +417,7 @@ export default function CalendarView({
         </div>
       </div>
 
-      {/* 4. Calendar Reminder Filters: ALL, AD, BS, TITHI */}
-      <div className="calendar-filter-row" role="radiogroup" aria-label="Reminder Calendar Filter">
-        <span className="filter-title">Filter:</span>
-        {["ALL", "AD", "BS", "TITHI"].map((f) => (
-          <button
-            key={f}
-            type="button"
-            className={`filter-chip ${activeFilter === f ? "active" : ""} chip-${f.toLowerCase()}`}
-            onClick={() => onChangeFilter(f)}
-          >
-            {f === "ALL" ? "All Calendars" : `${f} Reminders`}
-          </button>
-        ))}
-      </div>
-
-      {/* 5. Weekday Names Row */}
+      {/* Weekday Names Row */}
       <div className="weekday-header-row">
         {WEEKDAYS.map((day) => (
           <div key={day} className="weekday-label">
@@ -371,22 +445,6 @@ export default function CalendarView({
             />
           );
         })}
-      </div>
-
-      {/* Helper Legend */}
-      <div className="calendar-legend">
-        <div className="legend-item">
-          <span className="legend-sample center-num">4</span>
-          <span>{calendarMode === "AD" ? "AD Date" : "BS Date"}</span>
-        </div>
-        <div className="legend-item">
-          <span className="legend-sample corner-num">19</span>
-          <span>{calendarMode === "AD" ? "BS Date" : "AD Date"}</span>
-        </div>
-        <div className="legend-item">
-          <span className="legend-sample tithi-text">Ekadashi</span>
-          <span>Tithi</span>
-        </div>
       </div>
     </section>
   );

@@ -1,7 +1,8 @@
 import { useState } from "react";
 import SettingsModal from "./SettingsModal";
+import { CloseIcon } from "./Icons";
 
-export default function Header({ onResetData }) {
+export default function Header({ onResetData, theme, onToggleTheme, currentLocation, onLocationChange, onDataReload }) {
   const [showSettings, setShowSettings] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
 
@@ -9,16 +10,10 @@ export default function Header({ onResetData }) {
     <header className="app-header">
       <div className="brand">
         <div className="brand-logo" aria-hidden="true">
-          <span className="logo-tri">▲</span>
-          <span className="logo-dot">●</span>
+          <img src="/logo.png" alt="TriCalendar Logo" className="brand-logo-img" />
         </div>
         <div className="brand-text">
           <h1 className="brand-title">TriCalendar</h1>
-          <div className="brand-badges">
-            <span className="calendar-pill">AD</span>
-            <span className="calendar-pill">BS</span>
-            <span className="calendar-pill">TITHI</span>
-          </div>
         </div>
       </div>
 
@@ -40,7 +35,7 @@ export default function Header({ onResetData }) {
         <button
           type="button"
           className="settings-btn"
-          title="Settings & Offline Info"
+          title="Settings & Theme"
           onClick={() => setShowSettings(true)}
           aria-label="Settings"
         >
@@ -64,6 +59,11 @@ export default function Header({ onResetData }) {
         <SettingsModal
           onClose={() => setShowSettings(false)}
           onResetData={onResetData}
+          theme={theme}
+          onToggleTheme={onToggleTheme}
+          currentLocation={currentLocation}
+          onLocationChange={onLocationChange}
+          onDataReload={onDataReload}
         />
       )}
 
@@ -76,8 +76,9 @@ export default function Header({ onResetData }) {
                 type="button"
                 className="close-icon-btn"
                 onClick={() => setShowProfile(false)}
+                aria-label="Close"
               >
-                ✕
+                <CloseIcon size={14} />
               </button>
             </div>
             <div className="profile-body">

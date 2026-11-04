@@ -2,4 +2,9 @@ include ':app'
 include ':capacitor-cordova-android-plugins'
 project(':capacitor-cordova-android-plugins').projectDir = new File('./capacitor-cordova-android-plugins/')
 
+include ':calendar-engine'
+
+project(':calendar-engine').projectDir =
+    new File('../../calendar-engine')
+
 apply from: 'capacitor.settings.gradle'

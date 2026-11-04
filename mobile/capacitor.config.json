@@ -1,5 +1,12 @@
 {
   "appId": "com.riman.tricalendar",
   "appName": "TriCalendar",
-  "webDir": "dist"
+  "webDir": "dist",
+  "plugins": {
+    "CapacitorSQLite": {
+      "iosDatabaseLocation": "Library/CapacitorDatabase",
+      "androidIsEncryption": false
+    }
+    
+  }
 }
