@@ -1,0 +1,85 @@
+# ==========================================
+# Root .gitignore for TriCalendar
+# Covers root, /mobile, and /calendar-engine
+# ==========================================
+
+# ── OS & IDE Files ─────────────────────────
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+*.swp
+*.swo
+*.sw?
+*~
+*.bak
+
+# VS Code & JetBrains / Android Studio
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# ── Node / Web (mobile) ────────────────────
+node_modules/
+dist/
+dist-ssr/
+*.local
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ── Java / Maven (calendar-engine) ─────────
+target/
+*.class
+*.jar
+*.war
+*.ear
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+classpath.txt
+
+# ── Gradle & Android ───────────────────────
+.gradle/
+build/
+bin/
+gen/
+*.dex
+
+# Built Android binaries
+*.apk
+*.ap_
+*.aab
+*.aar
+
+# Android local configuration & keystores
+local.properties
+*.jks
+*.keystore
+
+# Android build cache, logs & captures
+captures/
+.externalNativeBuild/
+.cxx/
+proguard/
+*.log
+*.hprof
+.navigation/
+
+# Capacitor copied public web assets & generated configs
+mobile/android/app/src/main/assets/public/
+mobile/android/app/src/main/assets/capacitor.config.json
+mobile/android/app/src/main/assets/capacitor.plugins.json
+mobile/android/app/src/main/res/xml/config.xml
+mobile/android/capacitor-cordova-android-plugins/

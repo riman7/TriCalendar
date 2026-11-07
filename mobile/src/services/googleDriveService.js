@@ -1,11 +1,13 @@
+import { Capacitor, registerPlugin } from "@capacitor/core";
+
+const CalendarEngine = registerPlugin("CalendarEngine");
+
 /**
  * Google Drive Backup & Restore Service for TriCalendar
  *
- * Uses the standard Google OAuth2 implicit grant flow via browser redirect / popup
- * and the Google Drive v3 REST API.
+ * Supports native Google Play Services Auth on Android (no browser redirect, no loopback)
+ * and OAuth2 implicit flow on standard Web.
  * Scope: 'https://www.googleapis.com/auth/drive.file'
- * (Gives access ONLY to files/folders created by this app or opened by user,
- * keeping user's entire drive private and safe).
  */
 
 const STORAGE_KEYS = {
@@ -17,22 +19,25 @@ const STORAGE_KEYS = {
   FILE_ID: "tricalendar_gdrive_file_id",
   LAST_BACKUP: "tricalendar_gdrive_last_backup",
   AUTO_BACKUP: "tricalendar_gdrive_auto_backup",
+  USER_EMAIL: "tricalendar_gdrive_user_email",
 };
 
 export const BACKUP_FILE_NAME = "tricalendar-backup.json";
+export const DEFAULT_FOLDER_NAME = "TriCalendar Backoff";
 
 // TriCalendar Google OAuth2 Client ID
-export const DEFAULT_CLIENT_ID = "783071326172-sc8k53000j3qhep13nj9p79qppj692lm.apps.googleusercontent.com";
+export const DEFAULT_CLIENT_ID = "673136995980-t54dg6su1gknhr083sb69nadc9fus6g3.apps.googleusercontent.com";
 
 export function getStoredConfig() {
   return {
     clientId: localStorage.getItem(STORAGE_KEYS.CLIENT_ID) || DEFAULT_CLIENT_ID,
-    folderName: localStorage.getItem(STORAGE_KEYS.FOLDER_NAME) || "TriCalendar Backup",
+    folderName: localStorage.getItem(STORAGE_KEYS.FOLDER_NAME) || DEFAULT_FOLDER_NAME,
     folderId: localStorage.getItem(STORAGE_KEYS.FOLDER_ID) || null,
     fileId: localStorage.getItem(STORAGE_KEYS.FILE_ID) || null,
     lastBackup: localStorage.getItem(STORAGE_KEYS.LAST_BACKUP) || null,
     autoBackup: localStorage.getItem(STORAGE_KEYS.AUTO_BACKUP) !== "false",
-    isConnected: Boolean(getValidAccessToken())
+    userEmail: localStorage.getItem(STORAGE_KEYS.USER_EMAIL) || null,
+    isConnected: Boolean(getValidAccessToken() || (Capacitor.isNativePlatform() && localStorage.getItem(STORAGE_KEYS.USER_EMAIL)))
   };
 }
 
@@ -52,6 +57,10 @@ export function saveStoredConfig(config) {
     else localStorage.removeItem(STORAGE_KEYS.LAST_BACKUP);
   }
   if (config.autoBackup !== undefined) localStorage.setItem(STORAGE_KEYS.AUTO_BACKUP, String(config.autoBackup));
+  if (config.userEmail !== undefined) {
+    if (config.userEmail) localStorage.setItem(STORAGE_KEYS.USER_EMAIL, config.userEmail);
+    else localStorage.removeItem(STORAGE_KEYS.USER_EMAIL);
+  }
 }
 
 export function getValidAccessToken() {
@@ -75,22 +84,71 @@ export function setAccessToken(token, expiresInSeconds = 3600) {
   localStorage.setItem(STORAGE_KEYS.TOKEN_EXPIRY, String(Date.now() + expiresInSeconds * 1000));
 }
 
-export function disconnectGoogleDrive() {
+/**
+ * Ensures an active access token is available, silently refreshing via Android Google Play Services if needed.
+ */
+export async function ensureValidAccessToken() {
+  const active = getValidAccessToken();
+  if (active) return active;
+
+  if (Capacitor.isNativePlatform()) {
+    try {
+      const res = await CalendarEngine.getGoogleAccessToken();
+      if (res && res.accessToken) {
+        setAccessToken(res.accessToken, 3600);
+        if (res.email) saveStoredConfig({ userEmail: res.email });
+        return res.accessToken;
+      }
+    } catch (e) {
+      console.warn("Silent token refresh failed:", e);
+    }
+  }
+  return null;
+}
+
+export async function disconnectGoogleDrive() {
   localStorage.removeItem(STORAGE_KEYS.ACCESS_TOKEN);
   localStorage.removeItem(STORAGE_KEYS.TOKEN_EXPIRY);
   localStorage.removeItem(STORAGE_KEYS.FOLDER_ID);
   localStorage.removeItem(STORAGE_KEYS.FILE_ID);
+  localStorage.removeItem(STORAGE_KEYS.USER_EMAIL);
+
+  if (Capacitor.isNativePlatform()) {
+    try {
+      await CalendarEngine.signOutGoogle();
+    } catch (e) {
+      console.warn("Error signing out of native Google Play Services:", e);
+    }
+  }
 }
 
 /**
- * Initiates Google OAuth2 implicit grant flow.
- * Works across both Web and Android WebView via standard redirect or popup.
+ * Connect to Google Drive.
+ * On Android: Uses Google Play Services Native Account Picker (bypasses loopback/browser restrictions entirely).
+ * On Web: Falls back to browser redirect flow.
  */
-export function initiateGoogleAuth(clientId = DEFAULT_CLIENT_ID) {
-  const finalClientId = clientId || DEFAULT_CLIENT_ID;
-  if (!finalClientId) {
-    throw new Error("Google OAuth Client ID is required.");
+export async function connectGoogleDrive() {
+  if (Capacitor.isNativePlatform()) {
+    const res = await CalendarEngine.signInWithGoogle();
+    if (res && res.accessToken) {
+      setAccessToken(res.accessToken, 3600);
+      if (res.email) {
+        saveStoredConfig({ userEmail: res.email });
+      }
+      return { success: true, email: res.email, displayName: res.displayName };
+    }
+    throw new Error("No access token returned from Google Sign-In");
+  } else {
+    initiateGoogleAuthWeb();
+    return { pending: true };
   }
+}
+
+/**
+ * Web fallback for OAuth2 redirect
+ */
+export function initiateGoogleAuthWeb(clientId = DEFAULT_CLIENT_ID) {
+  const finalClientId = clientId || DEFAULT_CLIENT_ID;
   saveStoredConfig({ clientId: finalClientId });
 
   const redirectUri = window.location.origin + window.location.pathname;
@@ -101,7 +159,12 @@ export function initiateGoogleAuth(clientId = DEFAULT_CLIENT_ID) {
 }
 
 /**
- * Handle URL hash token on page load if returning from OAuth redirect
+ * Kept for backwards compatibility
+ */
+export const initiateGoogleAuth = connectGoogleDrive;
+
+/**
+ * Handle URL hash token on page load if returning from Web OAuth redirect
  */
 export function checkAuthRedirectCallback() {
   if (!window.location.hash) return false;
@@ -112,7 +175,6 @@ export function checkAuthRedirectCallback() {
 
   if (accessToken) {
     setAccessToken(accessToken, expiresIn ? Number(expiresIn) : 3600);
-    // Clean URL hash without reloading
     window.history.replaceState(null, "", window.location.pathname + window.location.search);
     return true;
   }
@@ -122,12 +184,15 @@ export function checkAuthRedirectCallback() {
 /**
  * Find or create the dedicated backup folder on Google Drive
  */
-export async function getOrCreateFolder(folderName = "TriCalendar Backup") {
-  const token = getValidAccessToken();
+export async function getOrCreateFolder(folderName = DEFAULT_FOLDER_NAME) {
+  const token = await ensureValidAccessToken();
   if (!token) throw new Error("Google Drive not connected or session expired.");
 
-  // 1. Check if folder already exists
-  const query = encodeURIComponent(`name = '${folderName.replace(/'/g, "\\'")}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`);
+  // 1. Check if folder already exists (checking specified name, TriCalendar Backoff, or TriCalendar Backup)
+  const escapedName = folderName.replace(/'/g, "\\'");
+  const query = encodeURIComponent(
+    `(name = '${escapedName}' or name = 'TriCalendar Backoff' or name = 'TriCalendar Backup') and mimeType = 'application/vnd.google-apps.folder' and trashed = false`
+  );
   const listRes = await fetch(`https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id,name)`, {
     headers: { Authorization: `Bearer ${token}` }
   });
@@ -139,9 +204,9 @@ export async function getOrCreateFolder(folderName = "TriCalendar Backup") {
 
   const listData = await listRes.json();
   if (listData.files && listData.files.length > 0) {
-    const folderId = listData.files[0].id;
-    saveStoredConfig({ folderId, folderName });
-    return folderId;
+    const existing = listData.files[0];
+    saveStoredConfig({ folderId: existing.id, folderName: existing.name });
+    return existing.id;
   }
 
   // 2. Create folder
@@ -170,8 +235,8 @@ export async function getOrCreateFolder(folderName = "TriCalendar Backup") {
 /**
  * Uploads database backup JSON payload to Google Drive
  */
-export async function uploadBackupToDrive(jsonData, folderName = "TriCalendar Backup") {
-  const token = getValidAccessToken();
+export async function uploadBackupToDrive(jsonData, folderName = DEFAULT_FOLDER_NAME) {
+  const token = await ensureValidAccessToken();
   if (!token) throw new Error("Google Drive is not connected.");
 
   const folderId = await getOrCreateFolder(folderName);
@@ -186,7 +251,6 @@ export async function uploadBackupToDrive(jsonData, folderName = "TriCalendar Ba
   const existingFileId = checkData.files?.[0]?.id;
 
   const contentStr = typeof jsonData === "string" ? jsonData : JSON.stringify(jsonData, null, 2);
-  const blob = new Blob([contentStr], { type: "application/json" });
 
   let uploadUrl = "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart";
   let method = "POST";
@@ -241,8 +305,8 @@ export async function uploadBackupToDrive(jsonData, folderName = "TriCalendar Ba
 /**
  * Downloads backup JSON directly from Google Drive
  */
-export async function downloadBackupFromDrive(folderName = "TriCalendar Backup") {
-  const token = getValidAccessToken();
+export async function downloadBackupFromDrive(folderName = DEFAULT_FOLDER_NAME) {
+  const token = await ensureValidAccessToken();
   if (!token) throw new Error("Google Drive is not connected.");
 
   const folderId = await getOrCreateFolder(folderName);

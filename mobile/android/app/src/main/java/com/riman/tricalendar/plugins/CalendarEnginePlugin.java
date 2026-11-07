@@ -6,6 +6,20 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.JSArray;
 import com.getcapacitor.annotation.CapacitorPlugin;
+import com.getcapacitor.annotation.ActivityCallback;
+import androidx.activity.result.ActivityResult;
+import android.content.Intent;
+
+import com.google.android.gms.auth.GoogleAuthUtil;
+import com.google.android.gms.auth.UserRecoverableAuthException;
+import com.google.android.gms.auth.api.signin.GoogleSignIn;
+import com.google.android.gms.auth.api.signin.GoogleSignInAccount;
+import com.google.android.gms.auth.api.signin.GoogleSignInClient;
+import com.google.android.gms.auth.api.signin.GoogleSignInOptions;
+import com.google.android.gms.auth.api.signin.GoogleSignInStatusCodes;
+import com.google.android.gms.common.api.ApiException;
+import com.google.android.gms.common.api.Scope;
+import com.google.android.gms.tasks.Task;
 
 import com.riman.calendar_engine.converter.BsAdConverter;
 import com.riman.calendar_engine.converter.TithiConverter;
@@ -800,5 +814,140 @@ public class CalendarEnginePlugin extends Plugin {
         obj.put("adhika",        info.isAdhika());
         obj.put("fullText",      info.getDisplayName());
         return obj;
+    }
+
+    // ── Native Google Drive Authentication ──────────────────────────────────────
+
+    @PluginMethod
+    public void signInWithGoogle(PluginCall call) {
+        try {
+            GoogleSignInOptions gso = new GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+                    .requestEmail()
+                    .requestScopes(new Scope("https://www.googleapis.com/auth/drive.file"))
+                    .build();
+
+            GoogleSignInClient client = GoogleSignIn.getClient(getActivity(), gso);
+            Intent signInIntent = client.getSignInIntent();
+            startActivityForResult(call, signInIntent, "handleGoogleSignInResult");
+        } catch (Exception e) {
+            call.reject("Failed to initiate Google Sign-In: " + e.getMessage(), e);
+        }
+    }
+
+    @ActivityCallback
+    private void handleGoogleSignInResult(PluginCall call, ActivityResult result) {
+        if (call == null) return;
+        try {
+            Intent data = result.getData();
+            if (data == null) {
+                call.reject("Google Sign-In canceled.", "CANCELLED");
+                return;
+            }
+            Task<GoogleSignInAccount> task = GoogleSignIn.getSignedInAccountFromIntent(data);
+            GoogleSignInAccount account = task.getResult(ApiException.class);
+
+            if (account == null) {
+                call.reject("No Google account returned.", "NO_ACCOUNT");
+                return;
+            }
+
+            // GoogleAuthUtil.getToken must run on a background thread
+            new Thread(() -> {
+                try {
+                    String scope = "oauth2:https://www.googleapis.com/auth/drive.file";
+                    String token = GoogleAuthUtil.getToken(getContext(), account.getAccount(), scope);
+
+                    JSObject res = new JSObject();
+                    res.put("accessToken", token);
+                    res.put("email", account.getEmail());
+                    res.put("displayName", account.getDisplayName());
+                    call.resolve(res);
+                } catch (UserRecoverableAuthException ure) {
+                    Intent recoveryIntent = ure.getIntent();
+                    if (recoveryIntent != null) {
+                        startActivityForResult(call, recoveryIntent, "handleGoogleRecoveryResult");
+                    } else {
+                        call.reject("User authorization required: " + ure.getMessage(), ure);
+                    }
+                } catch (Exception e) {
+                    call.reject("Failed to obtain Google access token: " + e.getMessage(), e);
+                }
+            }).start();
+
+        } catch (ApiException e) {
+            if (e.getStatusCode() == GoogleSignInStatusCodes.SIGN_IN_CANCELLED) {
+                call.reject("Sign-in cancelled by user.", "CANCELLED");
+            } else {
+                call.reject("Google Sign-In failed (" + e.getStatusCode() + "): " + e.getMessage(), e);
+            }
+        } catch (Exception e) {
+            call.reject("Google Sign-In error: " + e.getMessage(), e);
+        }
+    }
+
+    @ActivityCallback
+    private void handleGoogleRecoveryResult(PluginCall call, ActivityResult result) {
+        if (call == null) return;
+        try {
+            GoogleSignInAccount account = GoogleSignIn.getLastSignedInAccount(getContext());
+            if (account == null) {
+                call.reject("Authorization was not completed.");
+                return;
+            }
+            new Thread(() -> {
+                try {
+                    String scope = "oauth2:https://www.googleapis.com/auth/drive.file";
+                    String token = GoogleAuthUtil.getToken(getContext(), account.getAccount(), scope);
+                    JSObject res = new JSObject();
+                    res.put("accessToken", token);
+                    res.put("email", account.getEmail());
+                    res.put("displayName", account.getDisplayName());
+                    call.resolve(res);
+                } catch (Exception e) {
+                    call.reject("Failed to obtain token after recovery: " + e.getMessage(), e);
+                }
+            }).start();
+        } catch (Exception e) {
+            call.reject("Recovery error: " + e.getMessage(), e);
+        }
+    }
+
+    @PluginMethod
+    public void getGoogleAccessToken(PluginCall call) {
+        GoogleSignInAccount account = GoogleSignIn.getLastSignedInAccount(getContext());
+        if (account == null) {
+            call.reject("Not signed in to Google.");
+            return;
+        }
+        new Thread(() -> {
+            try {
+                String scope = "oauth2:https://www.googleapis.com/auth/drive.file";
+                String token = GoogleAuthUtil.getToken(getContext(), account.getAccount(), scope);
+                JSObject res = new JSObject();
+                res.put("accessToken", token);
+                res.put("email", account.getEmail());
+                call.resolve(res);
+            } catch (Exception e) {
+                call.reject("Failed to refresh token: " + e.getMessage(), e);
+            }
+        }).start();
+    }
+
+    @PluginMethod
+    public void signOutGoogle(PluginCall call) {
+        try {
+            GoogleSignInOptions gso = new GoogleSignInOptions.Builder(GoogleSignInOptions.DEFAULT_SIGN_IN)
+                    .requestEmail()
+                    .requestScopes(new Scope("https://www.googleapis.com/auth/drive.file"))
+                    .build();
+            GoogleSignInClient client = GoogleSignIn.getClient(getActivity(), gso);
+            client.signOut().addOnCompleteListener(task -> {
+                JSObject ret = new JSObject();
+                ret.put("success", true);
+                call.resolve(ret);
+            });
+        } catch (Exception e) {
+            call.reject("Sign out error: " + e.getMessage(), e);
+        }
     }
 }

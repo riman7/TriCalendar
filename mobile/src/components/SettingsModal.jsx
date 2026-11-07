@@ -13,6 +13,7 @@ import {
   disconnectGoogleDrive,
   uploadBackupToDrive,
   downloadBackupFromDrive,
+  DEFAULT_FOLDER_NAME,
   BACKUP_FILE_NAME
 } from "../services/googleDriveService";
 import {
@@ -92,23 +93,32 @@ export default function SettingsModal({
   }, []);
 
   // ── Drive & Backup Handlers ──
-  const handleConnectDrive = (e) => {
+  const handleConnectDrive = async (e) => {
     if (e && e.preventDefault) e.preventDefault();
     try {
       setIsConnectingDrive(true);
-      setBackupStatus("Opening Google sign-in…");
+      setBackupStatus("Connecting Google Drive…");
       saveStoredConfig({
-        folderName: folderNameInput.trim() || "TriCalendar Backup"
+        folderName: DEFAULT_FOLDER_NAME
       });
-      initiateGoogleAuth();
+      const res = await initiateGoogleAuth();
+      if (res?.success) {
+        setDriveConfig(getStoredConfig());
+        setBackupStatus(`✓ Connected to Google Drive${res.email ? ` (${res.email})` : ""}!`);
+      }
     } catch (err) {
+      if (err.message && (err.message.includes("cancelled") || err.message.includes("CANCELLED"))) {
+        setBackupStatus("Google Sign-In cancelled.");
+      } else {
+        setBackupStatus(err.message || "Failed to initiate Google connection");
+      }
+    } finally {
       setIsConnectingDrive(false);
-      setBackupStatus(err.message || "Failed to initiate Google connection");
     }
   };
 
-  const handleDisconnectDrive = () => {
-    disconnectGoogleDrive();
+  const handleDisconnectDrive = async () => {
+    await disconnectGoogleDrive();
     const updated = getStoredConfig();
     setDriveConfig(updated);
     setBackupStatus("Google Drive disconnected.");
@@ -370,6 +380,9 @@ export default function SettingsModal({
                     <div className="drive-card-info">
                       <span className="drive-card-title">Google Drive Folder</span>
                       <span className="drive-folder-name">📁 {driveConfig.folderName}</span>
+                      {driveConfig.userEmail && (
+                        <span className="drive-user-email">Account: {driveConfig.userEmail}</span>
+                      )}
                       {driveConfig.lastBackup && (
                         <span className="drive-last-backup">
                           Last backup: {new Date(driveConfig.lastBackup).toLocaleString()}
@@ -435,7 +448,7 @@ export default function SettingsModal({
             <div className="file-import-section">
               <span className="sub-label">Import / Export Backup File</span>
               <p className="setting-desc">
-                Import a <code>{BACKUP_FILE_NAME}</code> file downloaded from your Google Drive or saved previously.
+                Import a <b>{BACKUP_FILE_NAME}</b> file downloaded from your Google Drive or saved previously.
               </p>
 
               <div className="file-import-buttons">
@@ -498,10 +511,10 @@ export default function SettingsModal({
                   <h4>Google Drive Backup & Restore Guide</h4>
                   <ol>
                     <li>
-                      <b>Connect Google Drive:</b> Click "Connect Google Drive" and enter the folder name where you wish your backups stored. Sign in with your Google account.
+                      <b>Connect Google Drive:</b> Click "Connect Google Drive" and sign in with your Google account. TriCalendar will automatically create and use its dedicated folder.
                     </li>
                     <li>
-                      <b>Automatic Background Sync:</b> Once connected, every time you add, edit, or delete an event, TriCalendar quietly updates <code>{BACKUP_FILE_NAME}</code> in your Google Drive folder whenever you are online. If you are offline, the app operates completely normally without disruption.
+                      <b>Automatic Background Sync:</b> Once connected, every time you add, edit, or delete an event, TriCalendar quietly updates <b>{BACKUP_FILE_NAME}</b> in your Google Drive folder whenever you are online. If you are offline, the app operates completely normally without disruption.
                     </li>
                     <li>
                       <b>Manual Backup:</b> Tap <b>"Backup Now"</b> at any time to immediately push all your database events to Drive.
@@ -510,7 +523,7 @@ export default function SettingsModal({
                       <b>Restoring onto another device:</b>
                       <ul>
                         <li><b>Direct Restore:</b> Connect your Google Drive on the new device, then simply tap <b>"Restore from Drive"</b>.</li>
-                        <li><b>File Import:</b> Alternatively, open drive.google.com on any browser, download the <code>{BACKUP_FILE_NAME}</code> file, and click <b>"Select & Import File"</b> in TriCalendar settings. All your events will seamlessly merge back into your calendar!</li>
+                        <li><b>File Import:</b> Alternatively, open drive.google.com on any browser, download the <b>{BACKUP_FILE_NAME}</b> file, and click <b>"Select & Import File"</b> in TriCalendar settings. All your events will seamlessly merge back into your calendar!</li>
                       </ul>
                     </li>
                   </ol>
