@@ -120,6 +120,84 @@ public class OccurrenceService {
         return lunarOccurrences;
     }
 
+    public List<EventOccurrence> generateOccurrencesForYear(CalendarEvent event, int targetAdYear) throws IOException {
+        List<EventOccurrence> yearOccurrences = new ArrayList<>();
+
+        if (event.getRecurrence() == Recurrence.ONCE) {
+            LocalDate anchor = event.getAnchorAdDate();
+            if (anchor != null && anchor.getYear() == targetAdYear) {
+                yearOccurrences.add(new EventOccurrence(
+                    event.getId(),
+                    ReminderCalendar.AD,
+                    anchor
+                ));
+            }
+            return yearOccurrences;
+        }
+
+        Set<ReminderCalendar> calendars = event.getReminderCalendars();
+        LocalDate anchorAd = event.getAnchorAdDate();
+
+        // AD occurrence for targetAdYear
+        if (calendars != null && calendars.contains(ReminderCalendar.AD) && anchorAd != null) {
+            if (targetAdYear >= anchorAd.getYear()) {
+                try {
+                    LocalDate occDate = anchorAd.withYear(targetAdYear);
+                    yearOccurrences.add(new EventOccurrence(
+                        event.getId(),
+                        ReminderCalendar.AD,
+                        occDate
+                    ));
+                } catch (Exception ignored) {}
+            }
+        }
+
+        // BS occurrence for the BS years corresponding to targetAdYear
+        BsDate anchorBs = event.getAnchorBsDate();
+        if (calendars != null && calendars.contains(ReminderCalendar.BS) && anchorBs != null) {
+            // An AD year spans parts of two BS years (e.g. AD 2030 spans BS 2086 and 2087)
+            int approxBsYear = targetAdYear + 57;
+            for (int bsYr = approxBsYear - 1; bsYr <= approxBsYear + 1; bsYr++) {
+                if (bsYr < anchorBs.year()) continue;
+                try {
+                    int maxDays = calendarService.getBsMonthDays(bsYr, anchorBs.month());
+                    int validDay = Math.min(anchorBs.day(), maxDays);
+                    BsDate targetBsDate = new BsDate(bsYr, anchorBs.month(), validDay);
+                    CalendarDate cd = calendarService.getCalendarDate(targetBsDate);
+                    if (cd != null && cd.adDate() != null && cd.adDate().getYear() == targetAdYear) {
+                        yearOccurrences.add(new EventOccurrence(
+                            event.getId(),
+                            ReminderCalendar.BS,
+                            cd.adDate()
+                        ));
+                    }
+                } catch (Exception ignored) {}
+            }
+        }
+
+        // Tithi occurrence for targetAdYear
+        TithiInfo anchorLunar = event.getAnchorLunarDate();
+        if (calendars != null && calendars.contains(ReminderCalendar.TITHI) && anchorLunar != null && anchorAd != null) {
+            if (targetAdYear >= anchorAd.getYear()) {
+                try {
+                    List<LocalDate> dates = tithiOccurenceService.findYearlyTithiDates(anchorLunar, targetAdYear, 1);
+                    for (LocalDate dt : dates) {
+                        if (dt != null && dt.getYear() == targetAdYear) {
+                            yearOccurrences.add(new EventOccurrence(
+                                event.getId(),
+                                ReminderCalendar.TITHI,
+                                dt
+                            ));
+                        }
+                    }
+                } catch (Exception ignored) {}
+            }
+        }
+
+        yearOccurrences.removeIf(o -> o == null || o.occurrenceDate() == null);
+        return yearOccurrences;
+    }
+
     public List<EventOccurrence> generateOccurrences(CalendarEvent event, int numberOfYears) throws IOException {
         List<EventOccurrence> mainOccurrences = new ArrayList<>();
 

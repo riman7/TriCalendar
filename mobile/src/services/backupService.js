@@ -7,6 +7,9 @@
 
 import { getAllEvents, createEvent, updateEvent, deleteEvent } from "../repositories/eventRepository";
 import { uploadBackupToDrive, downloadBackupFromDrive, getStoredConfig } from "./googleDriveService";
+import { Capacitor, registerPlugin } from "@capacitor/core";
+
+const CalendarEngine = registerPlugin("CalendarEngine");
 
 export const BACKUP_VERSION = 1;
 
@@ -72,17 +75,42 @@ export async function importBackupPayload(payload, mode = "MERGE") {
 }
 
 /**
- * Downloads backup file directly to device (browser / mobile download)
+ * Saves backup file directly to device Downloads folder (on mobile) or triggers browser download (on web).
  */
 export async function downloadLocalBackupFile() {
   const payload = await createBackupPayload();
   const str = JSON.stringify(payload, null, 2);
+  const filename = `tricalendar-backup-${new Date().toISOString().split("T")[0]}.json`;
+
+  if (Capacitor.isNativePlatform()) {
+    try {
+      await CalendarEngine.saveBackupToDownloads({
+        content: str,
+        filename
+      });
+      return payload;
+    } catch (err) {
+      console.warn("saveBackupToDownloads failed, trying native shareBackupFile fallback", err);
+      try {
+        await CalendarEngine.shareBackupFile({
+          content: str,
+          filename,
+          title: "Save or Share Backup File"
+        });
+        return payload;
+      } catch (shareErr) {
+        console.warn("shareBackupFile fallback also failed", shareErr);
+      }
+    }
+  }
+
+  // Fallback for web or desktop browser
   const blob = new Blob([str], { type: "application/json" });
   const url = URL.createObjectURL(blob);
 
   const a = document.createElement("a");
   a.href = url;
-  a.download = `tricalendar-backup-${new Date().toISOString().split("T")[0]}.json`;
+  a.download = filename;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);

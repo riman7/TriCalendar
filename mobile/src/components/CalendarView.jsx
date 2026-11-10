@@ -16,7 +16,8 @@ export default function CalendarView({
   selectedDate,
   onSelectDate,
   occurrencesByDateMap,
-  todayStr
+  todayStr,
+  onVisibleYearChange
 }) {
   // Calendar mode: "AD" (Gregorian) or "BS" (Bikram Sambat)
   const [calendarMode, setCalendarMode] = useState("AD");
@@ -219,6 +220,7 @@ export default function CalendarView({
             primary:   `${adMonthName} ${adView.year}`,
             secondary: `${bsMonthName} ${bsYear} BS`
           });
+          if (onVisibleYearChange) onVisibleYearChange(adView.year);
         } else {
           result = await getBsMonthGrid(bsView.year, bsView.month);
           if (cancelled) return;
@@ -237,6 +239,7 @@ export default function CalendarView({
             primary:   `${bsMonthName} ${bsView.year} BS`,
             secondary: `${bsNepaliName} · ${adMonthName} ${adYear} AD`
           });
+          if (onVisibleYearChange && adYear) onVisibleYearChange(adYear);
         }
       } catch (err) {
         console.error("Failed to load calendar grid:", err);

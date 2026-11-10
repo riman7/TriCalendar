@@ -39,9 +39,23 @@ import com.misrilibrary.tithi.model.MonthSystem;
 import com.misrilibrary.tithi.model.Paksha;
 import com.misrilibrary.tithi.model.TithiInfo;
 
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.content.ContentResolver;
+import android.content.ContentValues;
 import android.content.Context;
 import android.location.Location;
 import android.location.LocationManager;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Environment;
+import android.provider.MediaStore;
+import androidx.core.app.NotificationCompat;
+import androidx.core.content.FileProvider;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.OutputStream;
 
 import java.io.IOException;
 import java.time.LocalDate;
@@ -707,12 +721,16 @@ public class CalendarEnginePlugin extends Plugin {
             }
             event.setReminderCalendars(reminderCalendars);
 
-            // ── numberOfYears ─────────────────────────────────────────────
-            Integer numberOfYears = call.getInt("numberOfYears");
-            int n = (numberOfYears != null && numberOfYears > 0) ? numberOfYears : 3;
-
-            // ── Generate & serialize ──────────────────────────────────────
-            List<EventOccurrence> occurrences = occurrenceService.generateOccurrences(event, n);
+            // ── targetYear or numberOfYears ─────────────────────────────────────────────
+            Integer targetYear = call.getInt("targetYear");
+            List<EventOccurrence> occurrences;
+            if (targetYear != null && targetYear > 0) {
+                occurrences = occurrenceService.generateOccurrencesForYear(event, targetYear);
+            } else {
+                Integer numberOfYears = call.getInt("numberOfYears");
+                int n = (numberOfYears != null && numberOfYears > 0) ? numberOfYears : 3;
+                occurrences = occurrenceService.generateOccurrences(event, n);
+            }
 
             JSArray occArray = new JSArray();
             for (EventOccurrence occ : occurrences) {
@@ -948,6 +966,148 @@ public class CalendarEnginePlugin extends Plugin {
             });
         } catch (Exception e) {
             call.reject("Sign out error: " + e.getMessage(), e);
+        }
+    }
+
+    @PluginMethod
+    public void saveBackupToDownloads(PluginCall call) {
+        String content = call.getString("content");
+        String filename = call.getString("filename", "tricalendar-backup.json");
+
+        if (content == null) {
+            call.reject("Content is required.");
+            return;
+        }
+
+        try {
+            Uri fileUri = null;
+            byte[] bytes = content.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                ContentResolver resolver = getContext().getContentResolver();
+                ContentValues contentValues = new ContentValues();
+                contentValues.put(MediaStore.MediaColumns.DISPLAY_NAME, filename);
+                contentValues.put(MediaStore.MediaColumns.MIME_TYPE, "application/json");
+                contentValues.put(MediaStore.MediaColumns.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS);
+
+                fileUri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, contentValues);
+                if (fileUri == null) {
+                    throw new IOException("Failed to create file in Downloads");
+                }
+
+                try (OutputStream os = resolver.openOutputStream(fileUri)) {
+                    if (os == null) {
+                        throw new IOException("Failed to open output stream for Downloads file");
+                    }
+                    os.write(bytes);
+                }
+            } else {
+                File downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
+                if (!downloadsDir.exists()) {
+                    downloadsDir.mkdirs();
+                }
+                File targetFile = new File(downloadsDir, filename);
+                try (FileOutputStream fos = new FileOutputStream(targetFile)) {
+                    fos.write(bytes);
+                }
+                String authority = getContext().getPackageName() + ".fileprovider";
+                fileUri = FileProvider.getUriForFile(getContext(), authority, targetFile);
+            }
+
+            // Post Download Completed Notification
+            showDownloadNotification(filename, fileUri);
+
+            JSObject ret = new JSObject();
+            ret.put("success", true);
+            ret.put("path", filename);
+            call.resolve(ret);
+        } catch (Exception e) {
+            call.reject("Failed to save backup to Downloads: " + e.getMessage(), e);
+        }
+    }
+
+    private void showDownloadNotification(String filename, Uri fileUri) {
+        try {
+            NotificationManager nm = (NotificationManager) getContext().getSystemService(Context.NOTIFICATION_SERVICE);
+            String channelId = "tricalendar_downloads";
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                NotificationChannel channel = new NotificationChannel(
+                    channelId,
+                    "TriCalendar Downloads",
+                    NotificationManager.IMPORTANCE_DEFAULT
+                );
+                channel.setDescription("Notifications for downloaded backup files");
+                nm.createNotificationChannel(channel);
+            }
+
+            Intent intent = new Intent(Intent.ACTION_VIEW);
+            intent.setDataAndType(fileUri, "application/json");
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+
+            PendingIntent pendingIntent = PendingIntent.getActivity(
+                getContext(),
+                0,
+                intent,
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.M ? PendingIntent.FLAG_IMMUTABLE : 0
+            );
+
+            NotificationCompat.Builder builder = new NotificationCompat.Builder(getContext(), channelId)
+                .setSmallIcon(android.R.drawable.stat_sys_download_done)
+                .setContentTitle("Download complete")
+                .setContentText(filename)
+                .setAutoCancel(true)
+                .setContentIntent(pendingIntent);
+
+            nm.notify((int) System.currentTimeMillis(), builder.build());
+        } catch (Exception e) {
+            // Non-fatal if notification display fails (e.g. notification permission not granted on Android 13+)
+            e.printStackTrace();
+        }
+    }
+
+    @PluginMethod
+    public void shareBackupFile(PluginCall call) {
+        String content = call.getString("content");
+        String filename = call.getString("filename", "tricalendar-backup.json");
+        String title = call.getString("title", "Save or Share Backup File");
+
+        if (content == null) {
+            call.reject("Content is required.");
+            return;
+        }
+
+        try {
+            File backupDir = new File(getContext().getCacheDir(), "backups");
+            if (!backupDir.exists()) {
+                backupDir.mkdirs();
+            }
+
+            File file = new File(backupDir, filename);
+            try (FileOutputStream fos = new FileOutputStream(file)) {
+                fos.write(content.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            }
+
+            String authority = getContext().getPackageName() + ".fileprovider";
+            Uri contentUri = FileProvider.getUriForFile(getContext(), authority, file);
+
+            Intent shareIntent = new Intent(Intent.ACTION_SEND);
+            shareIntent.setType("application/json");
+            shareIntent.putExtra(Intent.EXTRA_STREAM, contentUri);
+            shareIntent.putExtra(Intent.EXTRA_SUBJECT, filename);
+            shareIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+
+            Intent chooser = Intent.createChooser(shareIntent, title);
+            chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+
+            getContext().startActivity(chooser);
+
+            JSObject ret = new JSObject();
+            ret.put("success", true);
+            call.resolve(ret);
+        } catch (Exception e) {
+            call.reject("Failed to share backup file: " + e.getMessage(), e);
         }
     }
 }

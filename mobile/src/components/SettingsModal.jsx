@@ -191,7 +191,7 @@ export default function SettingsModal({
   const handleExportLocalFile = async () => {
     try {
       await downloadLocalBackupFile();
-      setBackupStatus("✓ Backup file saved to your device!");
+      setBackupStatus("✓ Backup file saved to your device Downloads folder!");
     } catch (err) {
       setBackupStatus("Failed to save backup file: " + err.message);
     }

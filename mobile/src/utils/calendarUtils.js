@@ -505,7 +505,8 @@ export async function getBsMonthGrid(bsYear, bsMonth) {
  *   recurrence:        "ONCE"|"YEARLY",
  *   eventType:         "BIRTHDAY"|"ANNIVERSARY"|"MEETING"|"OTHER",
  *   reminderCalendars: ("AD"|"BS"|"TITHI")[],
- *   numberOfYears?:    number
+ *   numberOfYears?:    number,
+ *   targetYear?:       number
  * }} eventInput
  * @returns {Promise<{ eventId, reminderCalendar: string, occurrenceDate: string }[]>}
  */

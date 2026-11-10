@@ -99,6 +99,8 @@ function App() {
   // ── Events + Occurrences state (sourced entirely from SQLite + Java engine) ──
   const [events,      setEvents]      = useState([]);
   const [occurrences, setOccurrences] = useState([]); // { eventId, reminderCalendar, occurrenceDateAd }
+  const [visibleYearOccurrences, setVisibleYearOccurrences] = useState([]); // on-demand occurrences for navigated year
+  const [visibleYear, setVisibleYear] = useState(null);
 
   // Load all events from SQLite and generate their occurrence dates via the
   // native CalendarEngine plugin (OccurrenceService.generateOccurrences).
@@ -156,20 +158,86 @@ function App() {
     if (dbReady) loadData();
   }, [dbReady, todayStr, loadData]);
 
+  // Dynamically compute occurrences when user navigates to a year outside the standard 3-year window
+  useEffect(() => {
+    if (!visibleYear || !events || events.length === 0) {
+      setVisibleYearOccurrences([]);
+      return;
+    }
+
+    const currentYear = new Date().getFullYear();
+    // Normal window covers [currentYear, currentYear + 3]
+    if (visibleYear >= currentYear && visibleYear <= currentYear + 3) {
+      setVisibleYearOccurrences([]);
+      return;
+    }
+
+    let cancelled = false;
+    const yearlyEvents = events.filter(e => e.recurrence === "YEARLY");
+    if (yearlyEvents.length === 0) {
+      setVisibleYearOccurrences([]);
+      return;
+    }
+
+    Promise.all(
+      yearlyEvents.map(event =>
+        generateOccurrences({
+          eventId:           event.id,
+          title:             event.title,
+          description:       event.description || "",
+          anchorAdDate:      event.anchorAdDate,
+          anchorBsDate:      event.anchorBsDate,
+          anchorLunarDate:   event.anchorLunarDate,
+          recurrence:        event.recurrence,
+          eventType:         event.eventType,
+          reminderCalendars: event.reminderCalendars,
+          targetYear:        visibleYear
+        }).catch(err => {
+          console.warn("Failed to generate occurrences for navigated year:", visibleYear, err);
+          return [];
+        })
+      )
+    ).then(results => {
+      if (cancelled) return;
+      const extraOccs = results.flatMap((occs, i) =>
+        occs.map(occ => ({
+          eventId:          yearlyEvents[i].id,
+          reminderCalendar: occ.reminderCalendar,
+          occurrenceDateAd: occ.occurrenceDate,
+        }))
+      );
+      setVisibleYearOccurrences(extraOccs);
+    }).catch(console.error);
+
+    return () => { cancelled = true; };
+  }, [visibleYear, events]);
+
   // ── Derived maps ──────────────────────────────────────────────────────────────
 
   // { "YYYY-MM-DD": [ { occurrence, event }, ... ] }
   const occurrencesByDateMap = useMemo(() => {
     const eventMap = new Map(events.map(e => [e.id, e]));
     const map = {};
-    for (const occ of occurrences) {
+    const combined = visibleYearOccurrences.length > 0
+      ? [...occurrences, ...visibleYearOccurrences]
+      : occurrences;
+
+    for (const occ of combined) {
       const key = occ.occurrenceDateAd;
       if (!map[key]) map[key] = [];
       const event = eventMap.get(occ.eventId);
-      if (event) map[key].push({ occurrence: occ, event });
+      if (event) {
+        // Prevent duplicate occurrences for the same event & calendar on the same day
+        const alreadyAdded = map[key].some(
+          item => item.occurrence.eventId === occ.eventId && item.occurrence.reminderCalendar === occ.reminderCalendar
+        );
+        if (!alreadyAdded) {
+          map[key].push({ occurrence: occ, event });
+        }
+      }
     }
     return map;
-  }, [events, occurrences]);
+  }, [events, occurrences, visibleYearOccurrences]);
 
   // Events on the currently selected date (both generated occurrences and base event anchors)
   const eventsOnSelectedDate = useMemo(() => {
@@ -354,6 +422,7 @@ function App() {
             onSelectDate={handleSelectDate}
             occurrencesByDateMap={occurrencesByDateMap}
             todayStr={todayStr}
+            onVisibleYearChange={setVisibleYear}
           />
         </div>
 
